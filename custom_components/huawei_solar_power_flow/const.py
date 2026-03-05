@@ -1,7 +1,7 @@
 """Constants for Huawei Solar Power Flow."""
 
 DOMAIN = "huawei_solar_power_flow"
-VERSION = "1.0.0"
+VERSION = "1.0.2"
 
 # Configuration keys
 CONF_INVERTER_ACTIVE_POWER = "inverter_active_power"

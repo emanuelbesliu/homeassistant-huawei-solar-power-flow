@@ -66,21 +66,54 @@ class PowerFlowCalculator:
         meter: float,
         battery: float,
     ) -> None:
-        """Initialize with raw sensor values."""
+        """Initialize with raw sensor values.
+
+        Energy conservation rules enforced:
+          solar = generation_to_grid + generation_to_battery + solar_consumption
+          grid_import = grid_to_house + grid_to_battery
+          bat_charge = generation_to_battery + grid_to_battery
+          bat_discharge = battery_to_house  (+ battery_to_grid if applicable)
+          home = solar_consumption + grid_to_house + battery_to_house
+        """
         self._inverter_active = inverter_active
         self._inverter_input = inverter_input
         self._meter = meter
         self._battery = battery
 
-        # Pre-compute derived values
+        # --- Absolute values from signed raw sensors ---
         self._grid_import = max(-self._meter, 0.0)
         self._grid_export = max(self._meter, 0.0)
         self._solar = max(self._inverter_input, 0.0)
         self._bat_charge = max(self._battery, 0.0)
         self._bat_discharge = max(-self._battery, 0.0)
         self._home = max(self._inverter_active - self._meter, 0.0)
-        self._gen_to_bat = min(self._solar, self._bat_charge)
+
+        # --- Allocate solar to destinations from a shared budget ---
+        # Priority: battery first (physical: MPPT charges battery directly),
+        # then grid export, then house gets the remainder.
+        solar_budget = self._solar
+
+        # 1) Solar -> Battery: limited by both solar available and charge demand
+        self._gen_to_bat = min(solar_budget, self._bat_charge)
+        solar_budget -= self._gen_to_bat
+
+        # 2) Solar -> Grid: limited by remaining solar and grid export
+        self._gen_to_grid = min(solar_budget, self._grid_export)
+        solar_budget -= self._gen_to_grid
+
+        # 3) Solar -> House: whatever solar remains
+        self._solar_consumption = solar_budget
+
+        # --- Non-solar flows ---
+        # Grid -> Battery: any battery charge not covered by solar
         self._grid_to_bat = max(self._bat_charge - self._gen_to_bat, 0.0)
+
+        # Grid -> House: grid import minus what goes to battery
+        self._grid_to_house = max(self._grid_import - self._grid_to_bat, 0.0)
+
+        # Battery -> House: all battery discharge goes to house
+        # (Huawei systems don't do battery-to-grid feed-in)
+        self._bat_to_house = self._bat_discharge
 
     @property
     def grid_consumption(self) -> float:
@@ -105,7 +138,7 @@ class PowerFlowCalculator:
     @property
     def solar_consumption(self) -> float:
         """Solar power consumed by the house (W, >= 0)."""
-        return min(self._solar, self._home)
+        return self._solar_consumption
 
     @property
     def battery_charge_power(self) -> float:
@@ -120,7 +153,7 @@ class PowerFlowCalculator:
     @property
     def generation_to_grid(self) -> float:
         """Solar power exported to grid (W, >= 0)."""
-        return min(self._solar, self._grid_export)
+        return self._gen_to_grid
 
     @property
     def generation_to_battery(self) -> float:
@@ -135,12 +168,12 @@ class PowerFlowCalculator:
     @property
     def battery_to_house(self) -> float:
         """Battery discharge going to house (W, >= 0)."""
-        return self._bat_discharge
+        return self._bat_to_house
 
     @property
     def grid_to_house(self) -> float:
         """Grid power consumed by house (W, >= 0)."""
-        return max(self._grid_import - self._grid_to_bat, 0.0)
+        return self._grid_to_house
 
     def get_value(self, sensor_key: str) -> float:
         """Get computed value by sensor key."""
