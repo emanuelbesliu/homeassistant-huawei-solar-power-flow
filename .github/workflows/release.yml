@@ -1,0 +1,59 @@
+name: Validate Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  validate:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate Python syntax
+        run: |
+          python -m py_compile custom_components/huawei_solar_power_flow/__init__.py
+          python -m py_compile custom_components/huawei_solar_power_flow/const.py
+          python -m py_compile custom_components/huawei_solar_power_flow/config_flow.py
+          python -m py_compile custom_components/huawei_solar_power_flow/sensor.py
+          echo "Python syntax validation passed"
+
+      - name: Check manifest version matches release
+        run: |
+          RELEASE_TAG="${GITHUB_REF#refs/tags/v}"
+          MANIFEST_VERSION=$(python -c "import json; print(json.load(open('custom_components/huawei_solar_power_flow/manifest.json'))['version'])")
+
+          if [ "$RELEASE_TAG" != "$MANIFEST_VERSION" ]; then
+            echo "Version mismatch!"
+            echo "Release tag: v$RELEASE_TAG"
+            echo "Manifest version: $MANIFEST_VERSION"
+            exit 1
+          fi
+
+          echo "Version check passed: $MANIFEST_VERSION"
+
+      - name: Validate HACS configuration
+        run: |
+          if [ ! -f "hacs.json" ]; then
+            echo "hacs.json not found"
+            exit 1
+          fi
+          python -c "import json; json.load(open('hacs.json'))"
+          echo "HACS configuration valid"
+
+      - name: Validate manifest.json
+        run: |
+          python -c "import json; json.load(open('custom_components/huawei_solar_power_flow/manifest.json'))"
+          echo "manifest.json valid"
+
+      - name: Validate strings.json
+        run: |
+          python -c "import json; json.load(open('custom_components/huawei_solar_power_flow/strings.json'))"
+          echo "strings.json valid"

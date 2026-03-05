@@ -1,0 +1,14 @@
+{
+  "domain": "huawei_solar_power_flow",
+  "name": "Huawei Solar Power Flow",
+  "codeowners": [
+    "@emanuelbesliu"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/emanuelbesliu/homeassistant-huawei-solar-power-flow",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/emanuelbesliu/homeassistant-huawei-solar-power-flow/issues",
+  "requirements": [],
+  "version": "1.0.0"
+}

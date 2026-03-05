@@ -1,0 +1,45 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Huawei Solar Power Flow",
+        "description": "Configure the source entities from your Huawei Solar integration. The defaults work for standard single-inverter setups.",
+        "data": {
+          "inverter_active_power": "Inverter Active Power",
+          "inverter_input_power": "Inverter Input Power (DC Solar)",
+          "power_meter_active_power": "Power Meter Active Power",
+          "battery_power": "Battery Charge/Discharge Power",
+          "battery_soc": "Battery State of Capacity (optional)"
+        },
+        "data_description": {
+          "inverter_active_power": "Total AC bus power. Positive = producing, negative = consuming.",
+          "inverter_input_power": "Pure DC solar panel input. Always >= 0.",
+          "power_meter_active_power": "Grid meter. Positive = exporting, negative = importing.",
+          "battery_power": "Positive = charging, negative = discharging.",
+          "battery_soc": "Battery state of charge percentage (for display only)."
+        }
+      }
+    },
+    "error": {
+      "entity_not_found": "Entity not found. Make sure the Huawei Solar integration is running."
+    },
+    "abort": {
+      "already_configured": "Huawei Solar Power Flow is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Huawei Solar Power Flow Options",
+        "description": "Update the source entity mappings.",
+        "data": {
+          "inverter_active_power": "Inverter Active Power",
+          "inverter_input_power": "Inverter Input Power (DC Solar)",
+          "power_meter_active_power": "Power Meter Active Power",
+          "battery_power": "Battery Charge/Discharge Power",
+          "battery_soc": "Battery State of Capacity (optional)"
+        }
+      }
+    }
+  }
+}
