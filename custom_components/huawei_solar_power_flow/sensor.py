@@ -23,10 +23,9 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfPower
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
-from homeassistant.helpers.typing import EventType
 
 from .const import (
     CONF_BATTERY_POWER,
@@ -223,7 +222,7 @@ class HuaweiSolarPowerFlowSensor(SensorEntity):
 
         @callback
         def _async_sensor_state_listener(
-            event: EventType,
+            event: Event,
         ) -> None:
             """Handle source sensor state changes."""
             self._update_state()
