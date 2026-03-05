@@ -1,7 +1,8 @@
 """Sensor platform for Huawei Solar Power Flow.
 
 Creates 12 derived power flow sensors from Huawei Solar integration entities,
-with correct sign conventions and Modbus glitch filtering (zero-rejection).
+with correct sign conventions, Modbus glitch filtering (zero-rejection),
+and temporal coherence checking (coordinator pattern).
 
 Huawei SUN2000 Sign Conventions (verified with FusionSolar):
   inverter_active_power: positive = producing, negative = consuming
@@ -9,12 +10,22 @@ Huawei SUN2000 Sign Conventions (verified with FusionSolar):
   inverter_input_power: always >= 0, pure DC solar panel input
   power_meter_active_power: positive = EXPORTING, negative = IMPORTING
   batteries_charge_discharge_power: positive = charging, negative = discharging
+
+Architecture (v1.1.0):
+  PowerFlowCoordinator (coordinator.py):
+    - Single listener for all 4 source sensors
+    - Checks temporal coherence before recalculating
+    - Holds previous values during Modbus glitches
+    - Notifies all 12 sensors when values change
+
+  HuaweiSolarPowerFlowSensor (this file):
+    - Thin wrapper that reads computed value from coordinator
+    - No direct source sensor listening or calculation
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -23,34 +34,13 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfPower
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_track_state_change_event
 
-from .const import (
-    CONF_BATTERY_POWER,
-    CONF_BATTERY_SOC,
-    CONF_INVERTER_ACTIVE_POWER,
-    CONF_INVERTER_INPUT_POWER,
-    CONF_POWER_METER_ACTIVE_POWER,
-    DOMAIN,
-    SENSOR_TYPES,
-    ZERO_REJECT_THRESHOLD_DEFAULT,
-    ZERO_REJECT_THRESHOLD_SOLAR,
-)
+from .const import DOMAIN, SENSOR_TYPES
+from .coordinator import PowerFlowCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _float_or_none(hass: HomeAssistant, entity_id: str) -> float | None:
-    """Get float value from entity state, or None if unavailable."""
-    state = hass.states.get(entity_id)
-    if state is None or state.state in ("unavailable", "unknown", ""):
-        return None
-    try:
-        return float(state.state)
-    except (ValueError, TypeError):
-        return None
 
 
 class PowerFlowCalculator:
@@ -186,32 +176,17 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Huawei Solar Power Flow sensors from config entry."""
-    config = entry.data
-
-    source_entities = {
-        CONF_INVERTER_ACTIVE_POWER: config[CONF_INVERTER_ACTIVE_POWER],
-        CONF_INVERTER_INPUT_POWER: config[CONF_INVERTER_INPUT_POWER],
-        CONF_POWER_METER_ACTIVE_POWER: config[CONF_POWER_METER_ACTIVE_POWER],
-        CONF_BATTERY_POWER: config[CONF_BATTERY_POWER],
-    }
-
-    battery_soc_entity = config.get(CONF_BATTERY_SOC)
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
 
     sensors: list[HuaweiSolarPowerFlowSensor] = []
     for sensor_key, sensor_info in SENSOR_TYPES.items():
-        threshold = (
-            ZERO_REJECT_THRESHOLD_SOLAR
-            if sensor_key == "solar_production"
-            else ZERO_REJECT_THRESHOLD_DEFAULT
-        )
         sensors.append(
             HuaweiSolarPowerFlowSensor(
                 entry=entry,
                 sensor_key=sensor_key,
                 name=sensor_info["name"],
                 description=sensor_info["description"],
-                source_entities=source_entities,
-                zero_reject_threshold=threshold,
+                coordinator=coordinator,
             )
         )
 
@@ -219,7 +194,12 @@ async def async_setup_entry(
 
 
 class HuaweiSolarPowerFlowSensor(SensorEntity):
-    """A derived power flow sensor for Huawei Solar."""
+    """A derived power flow sensor for Huawei Solar.
+
+    Thin wrapper that reads its value from the shared PowerFlowCoordinator.
+    The coordinator handles all source sensor listening, coherence checking,
+    and calculation. This sensor just renders the coordinator's output.
+    """
 
     _attr_device_class = SensorDeviceClass.POWER
     _attr_native_unit_of_measurement = UnitOfPower.WATT
@@ -233,96 +213,49 @@ class HuaweiSolarPowerFlowSensor(SensorEntity):
         sensor_key: str,
         name: str,
         description: str,
-        source_entities: dict[str, str],
-        zero_reject_threshold: float,
+        coordinator: PowerFlowCoordinator,
     ) -> None:
         """Initialize the sensor."""
         self._sensor_key = sensor_key
-        self._source_entities = source_entities
-        self._zero_reject_threshold = zero_reject_threshold
-        self._previous_value: float | None = None
+        self._coordinator = coordinator
 
         self._attr_name = name
         self._attr_unique_id = f"{DOMAIN}_{sensor_key}"
         self._attr_extra_state_attributes = {
             "description": description,
-            "source_entities": source_entities,
         }
 
     async def async_added_to_hass(self) -> None:
-        """Register state listeners when added to hass."""
-        tracked_entities = list(self._source_entities.values())
+        """Register with coordinator when added to hass."""
 
         @callback
-        def _async_sensor_state_listener(
-            event: Event,
-        ) -> None:
-            """Handle source sensor state changes."""
-            self._update_state()
+        def _async_coordinator_updated() -> None:
+            """Handle coordinator value updates."""
+            self._update_from_coordinator()
             self.async_write_ha_state()
 
-        self.async_on_remove(
-            async_track_state_change_event(
-                self.hass, tracked_entities, _async_sensor_state_listener
-            )
-        )
+        self._coordinator.register_sensor_callback(_async_coordinator_updated)
 
-        # Initial state computation
-        self._update_state()
+        # Store callback ref for cleanup
+        self._update_callback = _async_coordinator_updated
+
+        # Initial state from coordinator
+        self._update_from_coordinator()
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Unregister from coordinator when removed."""
+        if hasattr(self, "_update_callback"):
+            self._coordinator.unregister_sensor_callback(self._update_callback)
 
     @callback
-    def _update_state(self) -> None:
-        """Recalculate sensor value from source entities."""
-        inverter_active = _float_or_none(
-            self.hass, self._source_entities[CONF_INVERTER_ACTIVE_POWER]
-        )
-        inverter_input = _float_or_none(
-            self.hass, self._source_entities[CONF_INVERTER_INPUT_POWER]
-        )
-        meter = _float_or_none(
-            self.hass, self._source_entities[CONF_POWER_METER_ACTIVE_POWER]
-        )
-        battery = _float_or_none(
-            self.hass, self._source_entities[CONF_BATTERY_POWER]
-        )
+    def _update_from_coordinator(self) -> None:
+        """Read current value from coordinator."""
+        self._attr_available = self._coordinator.available
+        value = self._coordinator.get_value(self._sensor_key)
+        self._attr_native_value = value
 
-        # Check availability: all required sources must have valid values
-        if (
-            inverter_active is None
-            or inverter_input is None
-            or meter is None
-            or battery is None
-        ):
-            self._attr_available = False
-            return
-
-        self._attr_available = True
-
-        calc = PowerFlowCalculator(
-            inverter_active=inverter_active,
-            inverter_input=inverter_input,
-            meter=meter,
-            battery=battery,
-        )
-
-        new_value = round(calc.get_value(self._sensor_key), 1)
-
-        # Zero-rejection filter: if new value is 0 but previous was above
-        # threshold, hold previous value (Modbus glitch protection)
-        if (
-            new_value == 0.0
-            and self._previous_value is not None
-            and self._previous_value > self._zero_reject_threshold
-        ):
-            _LOGGER.debug(
-                "Zero-rejection on %s: holding previous value %.1f "
-                "(threshold: %.1f)",
-                self._sensor_key,
-                self._previous_value,
-                self._zero_reject_threshold,
-            )
-            self._attr_native_value = self._previous_value
-            return
-
-        self._previous_value = new_value
-        self._attr_native_value = new_value
+        # Expose coherence status in attributes for debugging
+        self._attr_extra_state_attributes = {
+            **self._attr_extra_state_attributes,
+            "holding_previous": self._coordinator.holding,
+        }

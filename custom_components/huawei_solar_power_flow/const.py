@@ -1,7 +1,7 @@
 """Constants for Huawei Solar Power Flow."""
 
 DOMAIN = "huawei_solar_power_flow"
-VERSION = "1.0.2"
+VERSION = "1.1.0"
 
 # Configuration keys
 CONF_INVERTER_ACTIVE_POWER = "inverter_active_power"
@@ -9,6 +9,14 @@ CONF_INVERTER_INPUT_POWER = "inverter_input_power"
 CONF_POWER_METER_ACTIVE_POWER = "power_meter_active_power"
 CONF_BATTERY_POWER = "battery_power"
 CONF_BATTERY_SOC = "battery_soc"
+
+# Ordered list of the 4 required source sensor config keys
+SOURCE_KEYS: list[str] = [
+    CONF_INVERTER_ACTIVE_POWER,
+    CONF_INVERTER_INPUT_POWER,
+    CONF_POWER_METER_ACTIVE_POWER,
+    CONF_BATTERY_POWER,
+]
 
 # Default Huawei Solar entity IDs
 DEFAULT_INVERTER_ACTIVE_POWER = "sensor.inverter_active_power"
@@ -30,6 +38,20 @@ DEFAULT_BATTERY_SOC = "sensor.batteries_state_of_capacity"
 # Zero-rejection thresholds (W) for Modbus glitch filtering
 ZERO_REJECT_THRESHOLD_SOLAR = 100.0
 ZERO_REJECT_THRESHOLD_DEFAULT = 50.0
+
+# Coherence window: max allowed spread (seconds) between source sensor
+# last_updated timestamps. If spread exceeds this, sensors are considered
+# temporally mismatched (Modbus glitch) and previous values are held.
+# Huawei Solar polls all registers in one batch (~30s default interval),
+# so on a healthy connection all 4 sensors update within milliseconds.
+# 15s allows for minor jitter without false-triggering.
+COHERENCE_WINDOW_SECONDS = 15.0
+
+# Staleness timeout: if the newest source sensor hasn't updated in this many
+# seconds, all derived sensors are marked unavailable. This catches the case
+# where the entire Modbus connection is down (not just partial glitches).
+# Set to 3x the default poll interval (30s * 3 = 90s).
+STALENESS_TIMEOUT_SECONDS = 90.0
 
 # Sensor definitions: (key, name, description)
 SENSOR_TYPES = {
