@@ -10,14 +10,6 @@ CONF_POWER_METER_ACTIVE_POWER = "power_meter_active_power"
 CONF_BATTERY_POWER = "battery_power"
 CONF_BATTERY_SOC = "battery_soc"
 
-# Ordered list of the 4 required source sensor config keys
-SOURCE_KEYS: list[str] = [
-    CONF_INVERTER_ACTIVE_POWER,
-    CONF_INVERTER_INPUT_POWER,
-    CONF_POWER_METER_ACTIVE_POWER,
-    CONF_BATTERY_POWER,
-]
-
 # Default Huawei Solar entity IDs
 DEFAULT_INVERTER_ACTIVE_POWER = "sensor.inverter_active_power"
 DEFAULT_INVERTER_INPUT_POWER = "sensor.inverter_input_power"
@@ -39,19 +31,13 @@ DEFAULT_BATTERY_SOC = "sensor.batteries_state_of_capacity"
 ZERO_REJECT_THRESHOLD_SOLAR = 100.0
 ZERO_REJECT_THRESHOLD_DEFAULT = 50.0
 
-# Coherence window: max allowed spread (seconds) between source sensor
-# last_updated timestamps. If spread exceeds this, sensors are considered
-# temporally mismatched (Modbus glitch) and previous values are held.
-# Huawei Solar polls all registers in one batch (~30s default interval),
-# so on a healthy connection all 4 sensors update within milliseconds.
-# 15s allows for minor jitter without false-triggering.
-COHERENCE_WINDOW_SECONDS = 15.0
-
-# Staleness timeout: if the newest source sensor hasn't updated in this many
-# seconds, all derived sensors are marked unavailable. This catches the case
-# where the entire Modbus connection is down (not just partial glitches).
-# Set to 3x the default poll interval (30s * 3 = 90s).
-STALENESS_TIMEOUT_SECONDS = 90.0
+# Energy conservation sanity tolerance (W). After calculating all 12 derived
+# flows, the coordinator checks that energy balances hold (e.g. home power
+# equals sum of solar_consumption + grid_to_house + battery_to_house). If
+# any balance is violated by more than this tolerance, the values are likely
+# from mismatched source sensors (Modbus glitch) and previous values are held.
+# Set generously to avoid false positives from rounding and inverter losses.
+SANITY_TOLERANCE_WATTS = 500.0
 
 # Sensor definitions: (key, name, description)
 SENSOR_TYPES = {

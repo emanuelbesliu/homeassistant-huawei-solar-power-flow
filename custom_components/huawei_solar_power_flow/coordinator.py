@@ -1,33 +1,37 @@
 """Power Flow Coordinator for Huawei Solar Power Flow.
 
-Centralized coordinator that listens to all 4 raw Huawei Solar sensors,
-enforces temporal coherence (all sources must update within a tight window),
+Centralized coordinator that listens to all 4 raw Huawei Solar sensors
 and publishes computed power flow values to all 12 derived sensors.
 
-Modbus TCP Glitch Resilience:
-  - Normal: all 4 sources update within ~15s of each other -> recalculate
-  - Glitch: some sensors stale while others update -> hold previous values
-  - Offline: all sensors stale > 90s -> mark unavailable
-  - Recovery: coherence restored -> immediately recalculate
+Modbus TCP Glitch Resilience (value-based):
+  The Huawei Solar integration polls Modbus registers in batches on a ~30s
+  cycle. Source sensors update at different times and idle sensors (e.g.
+  battery at 0W) may not fire state_change events at all. Timestamp-based
+  coherence doesn't work here.
+
+  Instead, we use value-based sanity checking:
+  1. Always recalculate on every source state_change
+  2. After calculating, run energy conservation sanity checks
+  3. If values are sane: publish them
+  4. If impossible (large conservation violations): hold previous values
+  5. Zero-rejection filter catches sudden drops to zero
+  6. Unavailable/unknown source states -> mark all unavailable
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
 from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import (
-    COHERENCE_WINDOW_SECONDS,
     CONF_BATTERY_POWER,
     CONF_INVERTER_ACTIVE_POWER,
     CONF_INVERTER_INPUT_POWER,
     CONF_POWER_METER_ACTIVE_POWER,
-    SOURCE_KEYS,
-    STALENESS_TIMEOUT_SECONDS,
+    SANITY_TOLERANCE_WATTS,
     ZERO_REJECT_THRESHOLD_DEFAULT,
     ZERO_REJECT_THRESHOLD_SOLAR,
 )
@@ -46,24 +50,16 @@ def _float_or_none(hass: HomeAssistant, entity_id: str) -> float | None:
         return None
 
 
-def _get_last_updated(hass: HomeAssistant, entity_id: str) -> datetime | None:
-    """Get last_updated timestamp from entity state."""
-    state = hass.states.get(entity_id)
-    if state is None:
-        return None
-    return state.last_updated
-
-
 class PowerFlowCoordinator:
-    """Coordinate power flow calculations with temporal coherence checks.
+    """Coordinate power flow calculations with sanity checking.
 
     Instead of each sensor independently listening and recalculating,
     this coordinator:
     1. Listens to all 4 source sensors (once)
-    2. On any change, checks if all sources are temporally coherent
-    3. If coherent: recalculates all 12 values and notifies sensors
-    4. If not coherent: holds previous values (glitch protection)
-    5. If all stale: marks everything unavailable
+    2. On any change, recalculates all 12 values
+    3. Runs energy conservation sanity checks on the results
+    4. If sane: publishes new values to all 12 sensors
+    5. If impossible: holds previous valid values (glitch protection)
     """
 
     def __init__(
@@ -81,12 +77,10 @@ class PowerFlowCoordinator:
         self._values: dict[str, float | None] = {}
         # Previous valid values for zero-rejection and hold-on-glitch
         self._previous_values: dict[str, float] = {}
-        # Whether the system is available (coherent or held)
+        # Whether the system is available
         self._available: bool = False
         # Whether we're currently holding stale values due to a glitch
         self._holding: bool = False
-        # Track last coherent calculation time
-        self._last_coherent_calc: datetime | None = None
 
     @property
     def available(self) -> bool:
@@ -152,102 +146,15 @@ class PowerFlowCoordinator:
 
     @callback
     def _process_update(self) -> None:
-        """Process a source sensor update with coherence checking."""
-        now = datetime.now(timezone.utc)
+        """Process a source sensor update.
 
-        # Step 1: Get last_updated timestamps for all sources
-        timestamps: dict[str, datetime | None] = {}
-        for key in SOURCE_KEYS:
-            entity_id = self._source_entities[key]
-            timestamps[key] = _get_last_updated(self.hass, entity_id)
-
-        # Step 2: Check if any source is completely missing
-        valid_timestamps = {
-            k: v for k, v in timestamps.items() if v is not None
-        }
-
-        if len(valid_timestamps) < len(SOURCE_KEYS):
-            missing = [
-                k for k in SOURCE_KEYS if timestamps[k] is None
-            ]
-            _LOGGER.debug(
-                "Source sensors missing state: %s — marking unavailable",
-                missing,
-            )
-            self._available = False
-            self._holding = False
-            self._values = {}
-            self._notify_sensors()
-            return
-
-        # Step 3: Check temporal coherence
-        ts_values = list(valid_timestamps.values())
-        newest = max(ts_values)
-        oldest = min(ts_values)
-        spread_seconds = (newest - oldest).total_seconds()
-
-        # Step 4: Check for total staleness (all sensors too old)
-        age_of_newest = (now - newest).total_seconds()
-        if age_of_newest > STALENESS_TIMEOUT_SECONDS:
-            if self._available:
-                _LOGGER.warning(
-                    "All source sensors stale (newest: %.0fs ago, "
-                    "timeout: %ds) — marking unavailable",
-                    age_of_newest,
-                    STALENESS_TIMEOUT_SECONDS,
-                )
-            self._available = False
-            self._holding = False
-            self._values = {}
-            self._notify_sensors()
-            return
-
-        # Step 5: Check coherence window
-        if spread_seconds > COHERENCE_WINDOW_SECONDS:
-            # Temporal mismatch detected — some sensors updated, others stale
-            if not self._holding:
-                stale_sources = {
-                    k: (newest - v).total_seconds()
-                    for k, v in valid_timestamps.items()
-                    if (newest - v).total_seconds() > COHERENCE_WINDOW_SECONDS
-                }
-                _LOGGER.warning(
-                    "Modbus glitch detected: sensor timestamp spread %.1fs "
-                    "(threshold: %ds). Stale sources: %s — holding "
-                    "previous values",
-                    spread_seconds,
-                    COHERENCE_WINDOW_SECONDS,
-                    {k: f"{v:.0f}s behind" for k, v in stale_sources.items()},
-                )
-                self._holding = True
-
-            # Keep previous values, stay available if we had values before
-            if self._previous_values:
-                self._available = True
-            else:
-                # No previous values to hold — can't display anything
-                self._available = False
-
-            # Don't recalculate, don't notify (values unchanged)
-            return
-
-        # Step 6: Sources are coherent — recalculate
-        if self._holding:
-            _LOGGER.info(
-                "Modbus coherence restored (spread: %.1fs) — resuming "
-                "normal calculation",
-                spread_seconds,
-            )
-            self._holding = False
-
-        self._recalculate(now)
-
-    @callback
-    def _recalculate(self, now: datetime) -> None:
-        """Recalculate all 12 power flow values from coherent sources."""
-        # Import here to avoid circular dependency
+        Reads all 4 source values, recalculates, and runs sanity checks.
+        If any source is unavailable/unknown, marks all derived sensors
+        unavailable. If values fail sanity checks, holds previous values.
+        """
         from .sensor import PowerFlowCalculator
 
+        # Step 1: Read all source values
         inverter_active = _float_or_none(
             self.hass, self._source_entities[CONF_INVERTER_ACTIVE_POWER]
         )
@@ -261,19 +168,33 @@ class PowerFlowCoordinator:
             self.hass, self._source_entities[CONF_BATTERY_POWER]
         )
 
-        # All sources must have valid numeric values
+        # Step 2: If any source is unavailable, mark everything unavailable
         if (
             inverter_active is None
             or inverter_input is None
             or meter is None
             or battery is None
         ):
-            _LOGGER.debug("One or more source values are non-numeric — skipping")
+            unavailable = [
+                k for k, v in {
+                    CONF_INVERTER_ACTIVE_POWER: inverter_active,
+                    CONF_INVERTER_INPUT_POWER: inverter_input,
+                    CONF_POWER_METER_ACTIVE_POWER: meter,
+                    CONF_BATTERY_POWER: battery,
+                }.items() if v is None
+            ]
+            _LOGGER.debug(
+                "Source sensors unavailable: %s — marking derived "
+                "sensors unavailable",
+                unavailable,
+            )
             self._available = False
+            self._holding = False
             self._values = {}
             self._notify_sensors()
             return
 
+        # Step 3: Calculate all 12 power flow values
         calc = PowerFlowCalculator(
             inverter_active=inverter_active,
             inverter_input=inverter_input,
@@ -281,7 +202,6 @@ class PowerFlowCoordinator:
             battery=battery,
         )
 
-        # Compute all 12 values with zero-rejection filtering
         new_values: dict[str, float] = {}
         for sensor_key in (
             "grid_consumption",
@@ -297,9 +217,104 @@ class PowerFlowCoordinator:
             "battery_to_house",
             "grid_to_house",
         ):
-            raw_value = round(calc.get_value(sensor_key), 1)
+            new_values[sensor_key] = round(calc.get_value(sensor_key), 1)
 
-            # Zero-rejection filter
+        # Step 4: Sanity check — energy conservation
+        # These must hold (within tolerance) if source sensors are coherent:
+        #   home ≈ solar_consumption + grid_to_house + battery_to_house
+        #   solar ≈ gen_to_grid + gen_to_bat + solar_consumption
+        #   grid_import ≈ grid_to_house + grid_to_battery
+        #   bat_charge ≈ gen_to_bat + grid_to_bat
+        #
+        # If sources are mismatched (glitch), the raw values won't balance
+        # and these checks will catch large violations.
+        sane = True
+        violations: list[str] = []
+
+        home = new_values["home_consumption"]
+        home_sum = (
+            new_values["solar_consumption"]
+            + new_values["grid_to_house"]
+            + new_values["battery_to_house"]
+        )
+        home_err = abs(home - home_sum)
+        if home_err > SANITY_TOLERANCE_WATTS:
+            violations.append(
+                f"home={home:.0f} vs parts={home_sum:.0f} "
+                f"(err={home_err:.0f}W)"
+            )
+            sane = False
+
+        solar = new_values["solar_production"]
+        solar_sum = (
+            new_values["generation_to_grid"]
+            + new_values["generation_to_battery"]
+            + new_values["solar_consumption"]
+        )
+        solar_err = abs(solar - solar_sum)
+        if solar_err > SANITY_TOLERANCE_WATTS:
+            violations.append(
+                f"solar={solar:.0f} vs parts={solar_sum:.0f} "
+                f"(err={solar_err:.0f}W)"
+            )
+            sane = False
+
+        grid_in = new_values["grid_consumption"]
+        grid_in_sum = (
+            new_values["grid_to_house"]
+            + new_values["grid_to_battery"]
+        )
+        grid_err = abs(grid_in - grid_in_sum)
+        if grid_err > SANITY_TOLERANCE_WATTS:
+            violations.append(
+                f"grid_import={grid_in:.0f} vs parts={grid_in_sum:.0f} "
+                f"(err={grid_err:.0f}W)"
+            )
+            sane = False
+
+        bat_charge = new_values["battery_charge_power"]
+        bat_charge_sum = (
+            new_values["generation_to_battery"]
+            + new_values["grid_to_battery"]
+        )
+        bat_err = abs(bat_charge - bat_charge_sum)
+        if bat_err > SANITY_TOLERANCE_WATTS:
+            violations.append(
+                f"bat_charge={bat_charge:.0f} vs parts={bat_charge_sum:.0f} "
+                f"(err={bat_err:.0f}W)"
+            )
+            sane = False
+
+        # Step 5: Handle sanity result
+        if not sane and self._previous_values:
+            # Values are impossible and we have previous good values — hold
+            if not self._holding:
+                _LOGGER.warning(
+                    "Modbus glitch detected: energy conservation violated. "
+                    "Holding previous values. Violations: %s. "
+                    "Raw: inv_act=%.0f inv_inp=%.0f meter=%.0f bat=%.0f",
+                    violations,
+                    inverter_active,
+                    inverter_input,
+                    meter,
+                    battery,
+                )
+                self._holding = True
+            self._available = True
+            # Don't update values, don't notify — keep showing previous
+            return
+
+        if self._holding and sane:
+            _LOGGER.info(
+                "Modbus glitch resolved: energy conservation restored. "
+                "Resuming normal calculation."
+            )
+
+        self._holding = False
+
+        # Step 6: Apply zero-rejection filter
+        final_values: dict[str, float] = {}
+        for sensor_key, raw_value in new_values.items():
             threshold = (
                 ZERO_REJECT_THRESHOLD_SOLAR
                 if sensor_key == "solar_production"
@@ -315,24 +330,24 @@ class PowerFlowCoordinator:
                     prev,
                     threshold,
                 )
-                new_values[sensor_key] = prev
+                final_values[sensor_key] = prev
             else:
-                new_values[sensor_key] = raw_value
+                final_values[sensor_key] = raw_value
 
-        self._values: dict[str, float | None] = dict(new_values)
-        self._previous_values = dict(new_values)
+        # Step 7: Publish
+        self._values: dict[str, float | None] = dict(final_values)
+        self._previous_values = dict(final_values)
         self._available = True
-        self._last_coherent_calc = now
 
         _LOGGER.debug(
-            "Coherent recalculation complete: solar=%.0f home=%.0f "
+            "Calculation complete: solar=%.0f home=%.0f "
             "grid_in=%.0f grid_out=%.0f bat_chg=%.0f bat_dis=%.0f",
-            new_values.get("solar_production", 0),
-            new_values.get("home_consumption", 0),
-            new_values.get("grid_consumption", 0),
-            new_values.get("grid_feed_in", 0),
-            new_values.get("battery_charge_power", 0),
-            new_values.get("battery_discharge_power", 0),
+            final_values.get("solar_production", 0),
+            final_values.get("home_consumption", 0),
+            final_values.get("grid_consumption", 0),
+            final_values.get("grid_feed_in", 0),
+            final_values.get("battery_charge_power", 0),
+            final_values.get("battery_discharge_power", 0),
         )
 
         self._notify_sensors()
