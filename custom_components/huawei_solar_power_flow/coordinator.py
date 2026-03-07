@@ -31,7 +31,9 @@ from .const import (
     CONF_INVERTER_ACTIVE_POWER,
     CONF_INVERTER_INPUT_POWER,
     CONF_POWER_METER_ACTIVE_POWER,
+    EXCLUSIVE_PAIRS,
     SANITY_TOLERANCE_WATTS,
+    ZERO_REJECT_MAX_HOLDS,
     ZERO_REJECT_THRESHOLD_DEFAULT,
     ZERO_REJECT_THRESHOLD_SOLAR,
 )
@@ -77,6 +79,10 @@ class PowerFlowCoordinator:
         self._values: dict[str, float | None] = {}
         # Previous valid values for zero-rejection and hold-on-glitch
         self._previous_values: dict[str, float] = {}
+        # Zero-rejection hold counters: how many consecutive calculations
+        # each sensor has been held at its previous value instead of zero.
+        # Resets to 0 when a non-zero value is accepted.
+        self._zero_hold_counts: dict[str, int] = {}
         # Whether the system is available
         self._available: bool = False
         # Whether we're currently holding stale values due to a glitch
@@ -312,7 +318,26 @@ class PowerFlowCoordinator:
 
         self._holding = False
 
-        # Step 6: Apply zero-rejection filter
+        # Step 6: Apply zero-rejection filter with TTL and exclusive pairs
+        #
+        # Zero-rejection catches brief Modbus zero-spikes: if a sensor drops
+        # to exactly 0 but was previously above threshold, hold the previous
+        # value for up to ZERO_REJECT_MAX_HOLDS consecutive calculations.
+        #
+        # Exclusive pairs: when the calculator produces a non-zero value for
+        # one side of a mutually exclusive pair (e.g. battery_charge_power),
+        # the opposite side (battery_discharge_power) must accept zero
+        # immediately — the transition is real, not a glitch.
+
+        # Build set of sensors whose opposite in an exclusive pair is non-zero
+        # in this calculation — these must NOT be zero-rejected.
+        force_accept_zero: set[str] = set()
+        for sensor_a, sensor_b in EXCLUSIVE_PAIRS:
+            if new_values.get(sensor_a, 0.0) > 0.0:
+                force_accept_zero.add(sensor_b)
+            if new_values.get(sensor_b, 0.0) > 0.0:
+                force_accept_zero.add(sensor_a)
+
         final_values: dict[str, float] = {}
         for sensor_key, raw_value in new_values.items():
             threshold = (
@@ -321,17 +346,55 @@ class PowerFlowCoordinator:
                 else ZERO_REJECT_THRESHOLD_DEFAULT
             )
             prev = self._previous_values.get(sensor_key)
+            hold_count = self._zero_hold_counts.get(sensor_key, 0)
 
-            if raw_value == 0.0 and prev is not None and prev > threshold:
+            if (
+                raw_value == 0.0
+                and prev is not None
+                and prev > threshold
+                and sensor_key not in force_accept_zero
+                and hold_count < ZERO_REJECT_MAX_HOLDS
+            ):
+                # Hold previous value — likely a brief Modbus zero-spike
+                self._zero_hold_counts[sensor_key] = hold_count + 1
                 _LOGGER.debug(
                     "Zero-rejection on %s: holding previous value %.1f "
-                    "(threshold: %.1f)",
+                    "(hold %d/%d, threshold: %.1f)",
                     sensor_key,
                     prev,
+                    hold_count + 1,
+                    ZERO_REJECT_MAX_HOLDS,
                     threshold,
                 )
                 final_values[sensor_key] = prev
             else:
+                # Accept the new value (zero or non-zero)
+                if (
+                    raw_value == 0.0
+                    and hold_count >= ZERO_REJECT_MAX_HOLDS
+                    and prev is not None
+                    and prev > threshold
+                ):
+                    _LOGGER.debug(
+                        "Zero-rejection expired on %s: accepting zero "
+                        "after %d holds (was %.1f)",
+                        sensor_key,
+                        hold_count,
+                        prev,
+                    )
+                elif (
+                    raw_value == 0.0
+                    and sensor_key in force_accept_zero
+                    and prev is not None
+                    and prev > threshold
+                ):
+                    _LOGGER.debug(
+                        "Zero-rejection overridden on %s: exclusive pair "
+                        "active, accepting zero (was %.1f)",
+                        sensor_key,
+                        prev,
+                    )
+                self._zero_hold_counts[sensor_key] = 0
                 final_values[sensor_key] = raw_value
 
         # Step 7: Publish

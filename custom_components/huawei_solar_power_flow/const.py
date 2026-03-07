@@ -1,7 +1,7 @@
 """Constants for Huawei Solar Power Flow."""
 
 DOMAIN = "huawei_solar_power_flow"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 # Configuration keys
 CONF_INVERTER_ACTIVE_POWER = "inverter_active_power"
@@ -27,9 +27,28 @@ DEFAULT_BATTERY_SOC = "sensor.batteries_state_of_capacity"
 #   batteries_charge_discharge_power: positive = charging,
 #                                     negative = discharging
 
-# Zero-rejection thresholds (W) for Modbus glitch filtering
+# Zero-rejection thresholds (W) for Modbus glitch filtering.
+# If a sensor's calculated value drops to exactly 0 but was previously above
+# the threshold, hold the previous value for up to ZERO_REJECT_MAX_HOLDS
+# consecutive calculations. This catches brief Modbus zero-spikes without
+# permanently holding stale values.
 ZERO_REJECT_THRESHOLD_SOLAR = 100.0
 ZERO_REJECT_THRESHOLD_DEFAULT = 50.0
+
+# Maximum number of consecutive calculations a zero-rejected value is held.
+# At ~30s poll interval this is ~90s. After this, the zero is accepted as
+# real (the source genuinely stopped producing/consuming).
+ZERO_REJECT_MAX_HOLDS = 3
+
+# Mutually exclusive sensor pairs. By physics, only one side of each pair
+# can be non-zero at a time. When the calculator produces a non-zero value
+# for one side, the opposite side's zero-rejection hold must be cleared
+# immediately — the transition is real, not a glitch.
+EXCLUSIVE_PAIRS: list[tuple[str, str]] = [
+    ("battery_charge_power", "battery_discharge_power"),
+    ("grid_consumption", "grid_feed_in"),
+    ("generation_to_battery", "grid_to_battery"),
+]
 
 # Energy conservation sanity tolerance (W). After calculating all 12 derived
 # flows, the coordinator checks that energy balances hold (e.g. home power
