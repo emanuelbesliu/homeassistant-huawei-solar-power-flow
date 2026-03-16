@@ -172,4 +172,10 @@ Should work with other Huawei SUN2000 models and LUNA2000 battery combinations.
 [release-badge]: https://img.shields.io/github/v/release/emanuelbesliu/homeassistant-huawei-solar-power-flow
 [release-url]: https://github.com/emanuelbesliu/homeassistant-huawei-solar-power-flow/releases
 [license-badge]: https://img.shields.io/github/license/emanuelbesliu/homeassistant-huawei-solar-power-flow
+## ☕ Support the Developer
+
+If you find this project useful, consider buying me a coffee!
+
+[!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://buymeacoffee.com/emanuelbesliu)
+
 [license-url]: https://github.com/emanuelbesliu/homeassistant-huawei-solar-power-flow/blob/main/LICENSE
