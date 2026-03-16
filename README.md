@@ -3,6 +3,7 @@
 [![HACS][hacs-badge]][hacs-url]
 [![GitHub Release][release-badge]][release-url]
 [![License][license-badge]][license-url]
+[![Buy Me A Coffee][bmc-badge]][bmc-url]
 
 A Home Assistant custom integration that creates **12 derived power flow sensors** from the [Huawei Solar](https://github.com/wlcrs/huawei_solar) integration. Designed for **Huawei SUN2000 inverters** with battery (LUNA2000), but works with any Huawei Solar setup.
 
@@ -172,6 +173,8 @@ Should work with other Huawei SUN2000 models and LUNA2000 battery combinations.
 [release-badge]: https://img.shields.io/github/v/release/emanuelbesliu/homeassistant-huawei-solar-power-flow
 [release-url]: https://github.com/emanuelbesliu/homeassistant-huawei-solar-power-flow/releases
 [license-badge]: https://img.shields.io/github/license/emanuelbesliu/homeassistant-huawei-solar-power-flow
+[bmc-badge]: https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black
+[bmc-url]: https://buymeacoffee.com/emanuelbesliu
 ## ☕ Support the Developer
 
 If you find this project useful, consider buying me a coffee!
